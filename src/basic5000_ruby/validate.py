@@ -7,6 +7,9 @@ from basic5000_ruby.html import PAGE_SIZE, chunk_sentences
 from basic5000_ruby.ruby import RubyPart, RubySentence, generate_all_sentences
 
 
+LONG_SOUND_MARK = "ー"
+
+
 def main() -> None:
     """生成済みHTMLとルビ生成結果を検証する。"""
 
@@ -89,9 +92,10 @@ class ScriptPageParser(HTMLParser):
 
 
 def validate_ruby_sentences(sentences: list[RubySentence]) -> None:
-    """ルビ生成結果が本文と読みを復元でき、かなにルビが付かないか検証する。"""
+    """ルビ生成結果が本文と読みを復元でき、かなにルビやルビ読みの長音記号が残らないか検証する。"""
 
     ruby_errors: list[str] = []
+    reading_errors: list[str] = []
     for sentence in sentences:
         text = "".join(part.text for part in sentence.parts)
         if text != sentence.text:
@@ -100,9 +104,23 @@ def validate_ruby_sentences(sentences: list[RubySentence]) -> None:
         if reading != sentence.reading:
             raise ValueError(f"{sentence.identifier} のルビ部品から読みを復元できません。")
         ruby_errors.extend(_validate_ruby_base_text(sentence))
+        reading_errors.extend(_validate_ruby_reading_text(sentence))
 
     if len(ruby_errors) != 0:
         raise ValueError("ルビ本文にかなが含まれています。\n" + "\n".join(ruby_errors))
+    if len(reading_errors) != 0:
+        raise ValueError("ルビ読みに長音記号が含まれています。\n" + "\n".join(reading_errors))
+
+
+def _validate_ruby_reading_text(sentence: RubySentence) -> list[str]:
+    reading_errors: list[str] = []
+    for part in sentence.parts:
+        if not isinstance(part, RubyPart):
+            continue
+        if LONG_SOUND_MARK not in part.reading:
+            continue
+        reading_errors.append(f"{sentence.identifier}: 本文「{part.text}」、読み「{part.reading}」、全文「{sentence.text}」")
+    return reading_errors
 
 
 def _validate_ruby_base_text(sentence: RubySentence) -> list[str]:

@@ -9,10 +9,13 @@ from basic5000_ruby.reading import (
     is_ruby_target_character,
     katakana_to_hiragana,
     normalize_segment_reading,
+    replace_nobashi,
 )
 
 
 READING_ONLY_PUNCTUATIONS = {"、", "。", "，", "．"}
+LONG_SOUND_MARK = "ー"
+LONG_SOUND_REPLACEMENT_CHARACTERS = {"あ", "い", "う", "え", "お"}
 
 
 @dataclass(frozen=True)
@@ -69,12 +72,12 @@ class _ReadingToken:
 # NOTE: jsut_hiho の読みが本文表記と食い違う2件だけ、本文を変えずにJSUT読みを優先する。
 READING_PART_EXCEPTIONS: dict[tuple[str, str], tuple[PlainPart | RubyPart, ...]] = {
     # NOTE: basic5000.txt は「汚らわしい」に対して「けがわらしー」としており、「らわ」と「わら」が一致しない。
-    ("汚らわしい", "けがわらしー"): (
+    ("汚らわしい", "けがわらしい"): (
         RubyPart(text="汚", reading="けが"),
         PlainPart(text="らわしい", reading="わらしい"),
     ),
     # NOTE: basic5000.txt は「儲ける」に対して「もーけた」としており、活用形が本文と一致しない。
-    ("儲ける", "もーけた"): (
+    ("儲ける", "もうけた"): (
         RubyPart(text="儲", reading="もう"),
         PlainPart(text="ける", reading="けた"),
     ),
@@ -285,10 +288,12 @@ def _frontend_reading(surface: str, pron: str) -> str:
 
 
 def _assign_readings(sentence: Sentence, frontend_tokens: list[_FrontendToken]) -> list[_ReadingToken]:
-    helper_reading = "".join(token.reading for token in frontend_tokens)
-    matcher = SequenceMatcher(None, helper_reading, sentence.kana, autojunk=False)
+    raw_helper_reading = "".join(token.reading for token in frontend_tokens)
+    helper_reading = replace_nobashi(raw_helper_reading)
+    target_reading = _normalize_target_reading(raw_helper_reading, sentence.kana)
+    matcher = SequenceMatcher(None, helper_reading, target_reading, autojunk=False)
     opcodes = matcher.get_opcodes()
-    token_groups = _reading_token_groups(frontend_tokens, opcodes, sentence.kana)
+    token_groups = _reading_token_groups(frontend_tokens, opcodes, target_reading)
 
     reading_tokens: list[_ReadingToken] = []
     for token_group in token_groups:
@@ -301,16 +306,45 @@ def _assign_readings(sentence: Sentence, frontend_tokens: list[_FrontendToken]) 
         reading_tokens.append(
             _ReadingToken(
                 surface="".join(token.surface for token in token_group),
-                raw_reading=sentence.kana[target_start:target_end],
+                raw_reading=target_reading[target_start:target_end],
             )
         )
 
     reading_tokens = _merge_empty_ruby_target_readings(reading_tokens)
     reading_tokens = _merge_unalignable_reading_tokens(reading_tokens)
     restored_reading = "".join(token.raw_reading for token in reading_tokens)
-    if restored_reading != sentence.kana:
+    if restored_reading != target_reading:
         raise ValueError(f"{sentence.identifier} の読み対応付けがkana_level3と一致しません。")
     return reading_tokens
+
+
+def _normalize_target_reading(helper_reading: str, target_reading: str) -> str:
+    helper_characters = _helper_characters_by_target_index(helper_reading, target_reading)
+    reading_characters: list[str] = []
+    for target_index, target_character in enumerate(target_reading):
+        if target_character == LONG_SOUND_MARK:
+            helper_character = helper_characters.get(target_index)
+            if helper_character is not None and helper_character in LONG_SOUND_REPLACEMENT_CHARACTERS:
+                reading_characters.append(helper_character)
+                continue
+        reading_characters.append(target_character)
+    return replace_nobashi("".join(reading_characters))
+
+
+def _helper_characters_by_target_index(helper_reading: str, target_reading: str) -> dict[int, str]:
+    matcher = SequenceMatcher(None, helper_reading, target_reading, autojunk=False)
+    helper_characters: dict[int, str] = {}
+    for tag, helper_start, helper_end, target_start, target_end in matcher.get_opcodes():
+        if tag == "equal" or tag == "replace":
+            if helper_end - helper_start != target_end - target_start:
+                continue
+            for offset in range(helper_end - helper_start):
+                helper_characters[target_start + offset] = helper_reading[helper_start + offset]
+            continue
+        if tag == "delete" or tag == "insert":
+            continue
+        raise ValueError(f"読み差分に未知の種別 {tag} があります。")
+    return helper_characters
 
 
 def _merge_empty_ruby_target_readings(reading_tokens: list[_ReadingToken]) -> list[_ReadingToken]:
@@ -327,7 +361,27 @@ def _merge_empty_ruby_target_readings(reading_tokens: list[_ReadingToken]) -> li
         previous_is_target = len(merged_tokens) != 0 and has_ruby_target(merged_tokens[-1].surface)
         next_is_target = token_index + 1 < len(reading_tokens) and has_ruby_target(reading_tokens[token_index + 1].surface)
         if previous_is_target and next_is_target:
-            raise ValueError(f"{token.surface} の空読みを左右どちらのルビ対象へ対応させるか決定できません。")
+            previous_token = merged_tokens[-1]
+            next_token = reading_tokens[token_index + 1]
+            left_token = _ReadingToken(
+                surface=f"{previous_token.surface}{token.surface}",
+                raw_reading=previous_token.raw_reading,
+            )
+            right_token = _ReadingToken(
+                surface=f"{token.surface}{next_token.surface}",
+                raw_reading=next_token.raw_reading,
+            )
+            left_can_create_parts = _can_create_parts(left_token)
+            right_can_create_parts = _can_create_parts(right_token)
+            if left_can_create_parts == right_can_create_parts:
+                raise ValueError(f"{token.surface} の空読みを左右どちらのルビ対象へ対応させるか決定できません。")
+            if left_can_create_parts:
+                merged_tokens[-1] = left_token
+                token_index += 1
+                continue
+            merged_tokens.append(right_token)
+            token_index += 2
+            continue
         if previous_is_target:
             previous_token = merged_tokens[-1]
             merged_tokens[-1] = _ReadingToken(
@@ -728,6 +782,7 @@ def _plain_character_reading_candidates(character: str) -> tuple[str, ...]:
     if character in {"あ", "い", "う", "え", "お", "ア", "イ", "ウ", "エ", "オ"}:
         candidates.append("ー")
     if character == "ー":
+        candidates.extend(LONG_SOUND_REPLACEMENT_CHARACTERS)
         candidates.append("、")
     if _is_optional_reading_character(character):
         candidates.append("")
@@ -739,6 +794,8 @@ def _plain_character_reading_cost(character: str, reading: str) -> int:
     if base_reading is None:
         raise ValueError(f"ルビ対象ではない文字 {character} の読みを決定できません。")
     if reading == base_reading:
+        return 0
+    if character == "ー" and reading in LONG_SOUND_REPLACEMENT_CHARACTERS:
         return 0
     if character == "ー" and reading == "、":
         return 0
