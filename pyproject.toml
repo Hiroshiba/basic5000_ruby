@@ -1,0 +1,23 @@
+[project]
+name = "basic5000-ruby"
+version = "0.1.0"
+description = "BASIC5000のルビ付き台本ページを生成する"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "pyopenjtalk",
+]
+
+[project.scripts]
+basic5000-ruby-build = "basic5000_ruby.build:main"
+basic5000-ruby-validate = "basic5000_ruby.validate:main"
+
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.uv]
+exclude-newer = "1 week"
