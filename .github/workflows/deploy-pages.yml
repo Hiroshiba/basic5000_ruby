@@ -53,6 +53,8 @@ jobs:
 
       - name: GitHub Pagesを設定
         uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - name: Pages成果物をアップロード
         uses: actions/upload-pages-artifact@v3
